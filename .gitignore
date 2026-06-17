@@ -1,0 +1,12 @@
+# Whitelist policy: ignore EVERYTHING, then re-allow only what was already published.
+# This guarantees nothing new gets committed by accident.
+
+# 1. Ignore everything
+*
+
+# 2. Re-allow the previously published files (and this .gitignore itself)
+!.gitignore
+!README.md
+!pipeline.py
+!query.py
+!requirements.txt

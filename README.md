@@ -1,29 +1,70 @@
-# OCKG - Open Cancer Knowledge Graph
+---
+license: cc-by-4.0
+language:
+- en
+tags:
+- cancer
+- biomedical
+- knowledge-graph
+- embeddings
+- pubmed
+- clinical-trials
+- drug-discovery
+- literature-based-discovery
+size_categories:
+- 10K<n<100K
+task_categories:
+- other
+- feature-extraction
+pretty_name: Open Cancer Knowledge Graph (OCKG)
+---
 
-> Built by a student on a consumer GPU. Costs nothing to run. Free for any researcher anywhere.
+# Open Cancer Knowledge Graph (OCKG)
 
-**Dataset on Hugging Face →** [pdm95/open-cancer-kg](https://huggingface.co/datasets/pdm95/open-cancer-kg)
+> *The first open, locally-runnable pipeline combining LLM-based structured extraction, vector embeddings, and cross-database linking of PubMed, ClinicalTrials.gov, and PubChem for cancer research gap detection - requiring no budget, no institutional access, and no proprietary tools.*
+
+**Pipeline code on GitHub →** [github.com/DaniMihai95/open-cancer-kg](https://github.com/DaniMihai95/open-cancer-kg)
 
 ---
 
-## What this is
+## Dataset name
 
-A pipeline that processes cancer research from three free public sources - PubMed, ClinicalTrials.gov, and PubChem - and structures every document into the same schema using a local LLM, then cross-references them by shared compounds, genes, pathways, and cancer types to surface connections that keyword search cannot find.
-
-This is the *undiscovered public knowledge* problem (Swanson, 1986). A compound tested in a 1994 breast cancer paper may share a pathway with a 2021 lung trial that failed for an unrelated reason - and nobody connected them. This pipeline does.
+**OCKG - Open Cancer Knowledge Graph v1.0**
 
 ---
 
-## Dataset (v1.0)
+## The problem
 
-| Source | Documents |
-|--------|-----------|
-| PubMed | 22,301 |
-| ClinicalTrials.gov | 19,988 |
-| PubChem | 92 |
-| **Total** | **42,381** |
+Cancer research is fragmented across three major public databases that have never been systematically cross-referenced at the document level:
 
-Download the structured dataset from Hugging Face - do not run the pipeline yourself unless you want to extend it. The full run takes ~125 hours on an RTX 4060 Ti.
+- **PubMed** - 35M+ paper abstracts, unstructured text
+- **ClinicalTrials.gov** - 500k+ registered trials, siloed
+- **PubChem** - 100M+ chemical compounds, disconnected from literature
+
+A compound tested in a 1994 breast cancer paper may share a biological pathway with a 2021 lung trial that failed for an unrelated reason. Because vocabulary differs, journals differ, and no system links them semantically, that connection is never made.
+
+This is the *undiscovered public knowledge* problem (Swanson, 1986). This pipeline solves it automatically, at scale, across all cancer types simultaneously.
+
+---
+
+## Dataset statistics (v1.0)
+
+| Source | Documents | Status |
+|--------|-----------|--------|
+| PubMed | 22,301 | ✅ complete |
+| ClinicalTrials.gov | 19,988 | ✅ complete |
+| PubChem | 92 | ✅ complete |
+| **Total** | **42,381** | ✅ |
+
+Additional outputs (not released publicly):
+- 200,000+ Q&A pairs for LLM fine-tuning (5 per document)
+- 10,346 research gap hypotheses flagged by the pipeline
+
+Known limitations:
+- 2 corrupted records excluded (pipeline interruption during writing)
+- ~15% of records may have incomplete entity extraction (vague abstracts)
+- `followed_up` field is an LLM judgment from abstract text alone, not citation-verified
+- First 2,090 PubMed records processed with qwen2.5:14b, remainder with qwen2.5:7b
 
 ---
 
@@ -37,74 +78,23 @@ Download the structured dataset from Hugging Face - do not run the pipeline your
 | BioGPT | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ |
 | iKraph | ✅ | ❌ | Partial | ❌ | ❌ | ❌ |
 | PKG2.0 | ❌ | ❌ | ✅ | ❌ | ✅ | ❌ |
-| **OCKG** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **OCKG (this work)** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+No existing public system combines all six properties.
 
 ---
 
-## Requirements
+## Top entities in the corpus
 
-```
-Python 3.10+
-Ollama (https://ollama.com)
-NVIDIA GPU with 8GB+ VRAM recommended
-```
+**Top compounds:** doxorubicin (1,212 docs), paclitaxel (578), cisplatin (542), curcumin (428), chitosan (330), melatonin (327), hyaluronic acid (263), docetaxel (253), gemcitabine (246), PARP inhibitors (240)
 
-```bash
-pip install -r requirements.txt
-ollama pull qwen2.5:7b
-ollama pull nomic-embed-text
-```
-
-Optional - free NCBI API key for 10x faster PubMed fetching:
-- Register at https://www.ncbi.nlm.nih.gov/account/
-- Account Settings → API Key Management → Generate
-- Use: `NCBI_API_KEY=your_key python pipeline.py ...`
+**Top cancer types:** breast cancer (2,007 docs), colorectal cancer (1,377), prostate cancer (773), lung cancer (686), ovarian cancer (659), melanoma (633), hepatocellular carcinoma (624)
 
 ---
 
-## Run the pipeline
+## What each record contains
 
-```bash
-# Test with 100 docs first
-python pipeline.py --source pubmed --limit 100 --workers 2
-
-# Full runs - leave overnight, fully resumable if interrupted
-python pipeline.py --source pubmed  --limit 50000 --workers 3
-python pipeline.py --source trials  --limit 20000 --workers 3
-python pipeline.py --source pubchem --limit 10000 --workers 3
-
-# Find cross-source connections
-python pipeline.py --crossref
-
-# Statistics
-python pipeline.py --stats
-```
-
-The pipeline is fully resumable - restart with the same command and it skips already-processed documents.
-
----
-
-## Query the dataset
-
-```bash
-# Semantic search
-python query.py --search "KRAS mutation untested compound pancreatic"
-
-# Find all documents mentioning a compound
-python query.py --entity compound "sotorasib"
-
-# Find cross-source connections
-python query.py --connections "cisplatin"
-
-# Export connections to CSV for Gephi / Cytoscape
-python query.py --export-connections connections.csv
-```
-
----
-
-## Output schema
-
-Each record contains:
+Every document - regardless of source - is structured into the same schema:
 
 ```json
 {
@@ -130,36 +120,130 @@ Each record contains:
   "similar_terms": ["kinase inhibitor", "targeted therapy"],
   "study_phase": "preclinical",
   "data_quality": "high",
+  "embed_string": "...",
   "embedding": [0.021, -0.034, "..."]
 }
 ```
 
+The `followed_up: false` flag marks findings the LLM judged as never built upon - research gap candidates. The `embedding` field is a 768-dimensional semantic fingerprint (nomic-embed-text) enabling cosine similarity search across the entire corpus regardless of vocabulary, journal, or decade.
+
+Q&A pairs are not included in this public release.
+
 ---
 
-## Performance
+## Cross-source connections found
 
-| Source | Docs | Time |
-|--------|------|------|
+After processing all three sources, the pipeline identified 20 cross-source connections - documents from different databases sharing the same compound, cancer type, and biological pathway without citing each other.
+
+Example finding:
+```
+Confidence: 0.75
+  pubmed → pubmed_37326467
+  trials → trial_NCT05372640
+  Shared compound:  abemaciclib
+  Shared cancer:    breast cancer
+  Shared pathway:   CDK4/6 pathway
+```
+
+Another finding:
+```
+Confidence: 0.55
+  trial → NCT06328387
+  pubmed → 9 separate papers
+  Shared compound:  chloroquine
+  Shared pathway:   autophagy
+```
+
+---
+
+## Setup
+
+```bash
+pip install requests tqdm
+ollama pull qwen2.5:7b
+ollama pull nomic-embed-text
+```
+
+Full pipeline code at: [github.com/DaniMihai95/open-cancer-kg](https://github.com/DaniMihai95/open-cancer-kg)
+
+Optional - free NCBI API key for higher rate limits (10 req/sec vs 3):
+1. Register at https://www.ncbi.nlm.nih.gov/account/
+2. Account Settings → API Key Management → Generate
+3. Use: `NCBI_API_KEY=your_key python pipeline.py ...`
+
+---
+
+## Run order
+
+```bash
+# Test first
+python pipeline.py --source pubmed --limit 100 --workers 2
+
+# Full runs - fully resumable if interrupted
+python pipeline.py --source pubmed  --limit 50000 --workers 3
+python pipeline.py --source trials  --limit 20000 --workers 3
+python pipeline.py --source pubchem --limit 10000 --workers 3
+
+# Find cross-source connections
+python pipeline.py --crossref
+
+# Statistics
+python pipeline.py --stats
+```
+
+---
+
+## Actual performance measured
+
+| Source | Docs | Time (qwen2.5:7b, RTX 4060 Ti 16GB) |
+|--------|------|--------------------------------------|
 | PubMed | 22,338 | ~55 hours |
 | ClinicalTrials | 19,988 | ~68 hours |
 | PubChem | 92 | ~2 hours |
 
-Measured on NVIDIA RTX 4060 Ti 16GB, power-limited to 125W, qwen2.5:7b, workers=3.
+Workers=3, power-limited to 125W for sustained operation.
 
 ---
 
-## Known limitations
+## Query your graph
 
-- ~15% of records may have incomplete entity extraction from vague abstracts
-- `followed_up` field is an LLM judgment from abstract text alone, not citation-verified
-- First 2,090 PubMed records used qwen2.5:14b, remainder qwen2.5:7b
-- 2 corrupted records excluded from final dataset
+```bash
+# Find all documents mentioning a compound
+python query.py --entity compound "sotorasib"
+
+# Find cross-source connections
+python query.py --connections "sotorasib"
+
+# Semantic search
+python query.py --search "KRAS mutation untested compound pancreatic"
+
+# Export connections to CSV
+python query.py --export-connections connections.csv
+```
+
+---
+
+## Data sources and licensing
+
+All source data is public domain:
+
+| Source | Owner | License |
+|--------|-------|---------|
+| PubMed abstracts | US National Library of Medicine | Public domain |
+| ClinicalTrials.gov | US federal government | Public domain |
+| PubChem | NIH | Public domain |
+
+This dataset (extracted JSON records + embeddings) is released under **CC BY 4.0** - free to use with attribution.
+
+Pipeline code is released under **MIT License**.
+
+Q&A pairs are not released publicly.
 
 ---
 
 ## Academic context
 
-This work contributes to literature-based discovery (LBD) and the undiscovered public knowledge problem (Swanson, 1986).
+This work is a contribution to **literature-based discovery (LBD)** and the *undiscovered public knowledge* problem (Swanson, 1986).
 
 **Related work:** Arsenyan et al. 2024 (BioNLP), iKraph 2023, PubMed KG 2.0 (Xu et al. 2024), Borchert et al. 2024, Sarol et al. 2024, BioStrataKG 2024.
 
@@ -181,7 +265,4 @@ This work contributes to literature-based discovery (LBD) and the undiscovered p
 
 ---
 
-## License
-
-- Pipeline code: MIT
-- Dataset: CC BY 4.0
+*Built on a student's GPU. Costs nothing to run. Free for any researcher anywhere.*
