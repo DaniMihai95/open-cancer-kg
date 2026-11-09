@@ -256,7 +256,7 @@ This work is a contribution to **literature-based discovery (LBD)** and the *und
 ```bibtex
 @dataset{ockg2026,
   title     = {Open Cancer Knowledge Graph (OCKG) v1.0},
-  author    = {Pocatilu Daniel Mihai},
+  author    = {Pocatilu Daniel-Mihai},
   year      = {2026},
   publisher = {Hugging Face},
   url       = {https://huggingface.co/datasets/pdm95/open-cancer-kg}
