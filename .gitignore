@@ -10,3 +10,5 @@
 !pipeline.py
 !query.py
 !requirements.txt
+!analysis/
+!analysis/paper_numbers.py
