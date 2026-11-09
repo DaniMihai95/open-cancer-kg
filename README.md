@@ -43,7 +43,7 @@ Cancer research is fragmented across three major public databases that have neve
 
 A compound tested in a 1994 breast cancer paper may share a biological pathway with a 2021 lung trial that failed for an unrelated reason. Because vocabulary differs, journals differ, and no system links them semantically, that connection is never made.
 
-This is the *undiscovered public knowledge* problem (Swanson, 1986). This pipeline solves it automatically, at scale, across all cancer types simultaneously.
+This is the *undiscovered public knowledge* problem (Swanson, 1986). This pipeline structures papers, trials and compounds into one schema and proposes links between them, so a person can check the ones worth reading together.
 
 ---
 
@@ -56,31 +56,21 @@ This is the *undiscovered public knowledge* problem (Swanson, 1986). This pipeli
 | PubChem | 92 | ✅ complete |
 | **Total** | **42,381** | ✅ |
 
-Additional outputs (not released publicly):
-- 200,000+ Q&A pairs for LLM fine-tuning (5 per document)
-- 10,346 research gap hypotheses flagged by the pipeline
+Not released: about 200,000 Q&A pairs for fine-tuning (5 per document).
 
-Known limitations:
-- 2 corrupted records excluded (pipeline interruption during writing)
-- ~15% of records may have incomplete entity extraction (vague abstracts)
-- `followed_up` field is an LLM judgment from abstract text alone, not citation-verified
-- First 2,090 PubMed records processed with qwen2.5:14b, remainder with qwen2.5:7b
+Known limitations, measured on the released files (see the paper and `analysis/paper_numbers.py`):
+- 2 corrupted lines excluded (pipeline interruption during writing); 12 document IDs appear twice.
+- Only 21.8% of the trial records mention cancer. The trial fetcher sent the cancer filter with the first page only, and ClinicalTrials.gov returns all studies when a later page request carries no filter.
+- All four entity fields (cancer types, pathways, compounds, genes) are empty in 30.0% of records: 13.6% of PubMed records, 48.4% of trial records.
+- Entity names are not normalised: breast cancer appears under 124 different strings.
+- `followed_up` is false in 75.5% of records, trials included, so it is not a usable gap signal. The `outcome` field of trial records comes from registration text, which holds no results.
+- First 2,090 PubMed records processed with qwen2.5:14b, the rest with qwen2.5:7b.
 
 ---
 
-## How it differs from existing systems
+## Related systems
 
-| System | LLM extraction | Embeddings | Cross-DB | Gap detection | Open/free | Cancer-focused |
-|--------|:-:|:-:|:-:|:-:|:-:|:-:|
-| Open Targets | ❌ | ❌ | Partial | ❌ | Partial | Partial |
-| SemMedDB | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
-| SPOKE | ❌ | ❌ | ✅ | ❌ | Partial | ❌ |
-| BioGPT | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ |
-| iKraph | ✅ | ❌ | Partial | ❌ | ❌ | ❌ |
-| PKG2.0 | ❌ | ❌ | ✅ | ❌ | ✅ | ❌ |
-| **OCKG (this work)** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-
-No existing public system combines all six properties.
+SemMedDB, SPOKE, the Open Targets Platform, PubMed Knowledge Graph 2.0 and iKraph are larger biomedical knowledge graphs, and PubMed Knowledge Graph 2.0 already links papers to clinical trials. OCKG is small and cancer-specific: one local language model fills the same schema for every source, every record has an embedding, and the whole pipeline runs on one consumer GPU. The paper compares them in its Related Work section.
 
 ---
 
@@ -133,7 +123,7 @@ Q&A pairs are not included in this public release.
 
 ## Cross-source connections found
 
-After processing all three sources, the pipeline identified 20 cross-source connections - documents from different databases sharing the same compound, cancer type, and biological pathway without citing each other.
+The linking rule pairs documents from different sources that share a compound, and keeps a pair when it also shares a cancer type or a pathway. On the released data it finds 13,324 such pairs, 43 of which share a compound, a cancer type and a pathway. `--crossref` prints the top 20. The pipeline does not check citations, so the two documents in a pair may already cite each other. Note: the released `--crossref` reads at most 100,000 candidate rows, about 15% of the candidates on this data.
 
 Example finding:
 ```
@@ -145,14 +135,6 @@ Confidence: 0.75
   Shared pathway:   CDK4/6 pathway
 ```
 
-Another finding:
-```
-Confidence: 0.55
-  trial → NCT06328387
-  pubmed → 9 separate papers
-  Shared compound:  chloroquine
-  Shared pathway:   autophagy
-```
 
 ---
 
@@ -195,11 +177,13 @@ python pipeline.py --stats
 
 ## Actual performance measured
 
-| Source | Docs | Time (qwen2.5:7b, RTX 4060 Ti 16GB) |
-|--------|------|--------------------------------------|
-| PubMed | 22,338 | ~55 hours |
+Working hours from the record timestamps (gaps under ten minutes):
+
+| Source | Docs | Time (RTX 4060 Ti 16GB) |
+|--------|------|--------------------------|
+| PubMed | 22,301 | ~76 hours (first 2,090 with qwen2.5:14b) |
 | ClinicalTrials | 19,988 | ~68 hours |
-| PubChem | 92 | ~2 hours |
+| PubChem | 92 | ~0.4 hours |
 
 Workers=3, power-limited to 125W for sustained operation.
 
@@ -225,11 +209,9 @@ python query.py --export-connections connections.csv
 
 ## Data sources and licensing
 
-All source data is public domain:
-
-| Source | Owner | License |
-|--------|-------|---------|
-| PubMed abstracts | US National Library of Medicine | Public domain |
+| Source | Owner | Terms |
+|--------|-------|-------|
+| PubMed abstracts | Their publishers (served by the US National Library of Medicine) | Abstracts can be under copyright, so the release holds no abstract text, only model-written summaries and extracted fields |
 | ClinicalTrials.gov | US federal government | Public domain |
 | PubChem | NIH | Public domain |
 
@@ -245,9 +227,9 @@ Q&A pairs are not released publicly.
 
 This work is a contribution to **literature-based discovery (LBD)** and the *undiscovered public knowledge* problem (Swanson, 1986).
 
-**Related work:** Arsenyan et al. 2024 (BioNLP), iKraph 2023, PubMed KG 2.0 (Xu et al. 2024), Borchert et al. 2024, Sarol et al. 2024, BioStrataKG 2024.
+**Paper:** Pocatilu, D.-M. (2026). *Open Cancer Knowledge Graph*. pdm.ai. https://www.pdmzerotrustbusiness.com/papers/
 
-**Affiliation:** Independent student research, Tilburg University, The Netherlands.
+**Author:** Daniel-Mihai Pocatilu, pdm.ai, ORCID 0009-0004-9820-6708.
 
 ---
 
