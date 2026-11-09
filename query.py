@@ -102,9 +102,11 @@ def semantic_search(query: str, top_k: int = 10):
     """
     try:
         import requests
+        import os
+        # Must be the model that embedded the records (v1.0: nomic-embed-text)
         r = requests.post(
-            "http://localhost:11434/api/embeddings",
-            json={"model": "nomic-embed-text", "prompt": query},
+            os.getenv("EMBED_BASE", "http://localhost:11434") + "/api/embeddings",
+            json={"model": os.getenv("EMBED_MODEL", "qwen3-embedding:4b"), "prompt": query},
             timeout=30,
         )
         query_vec = r.json()["embedding"]

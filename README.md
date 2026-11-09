@@ -60,7 +60,7 @@ Not released: about 200,000 Q&A pairs for fine-tuning (5 per document).
 
 Known limitations, measured on the released files (see the paper and `analysis/paper_numbers.py`):
 - 2 corrupted lines excluded (pipeline interruption during writing); 12 document IDs appear twice.
-- Only 21.8% of the trial records mention cancer. The trial fetcher sent the cancer filter with the first page only, and ClinicalTrials.gov returns all studies when a later page request carries no filter.
+- Only 21.8% of the trial records mention cancer. The trial fetcher sent the cancer filter with the first page only, and ClinicalTrials.gov returns all studies when a later page request carries no filter. The current code repeats the filter on every page.
 - All four entity fields (cancer types, pathways, compounds, genes) are empty in 30.0% of records: 13.6% of PubMed records, 48.4% of trial records.
 - Entity names are not normalised: breast cancer appears under 124 different strings.
 - `followed_up` is false in 75.5% of records, trials included, so it is not a usable gap signal. The `outcome` field of trial records comes from registration text, which holds no results.
@@ -115,7 +115,7 @@ Every document - regardless of source - is structured into the same schema:
 }
 ```
 
-The `followed_up: false` flag marks findings the LLM judged as never built upon - research gap candidates. The `embedding` field is a 768-dimensional semantic fingerprint (nomic-embed-text) enabling cosine similarity search across the entire corpus regardless of vocabulary, journal, or decade.
+The `followed_up: false` flag marks findings the LLM judged as never built upon - research gap candidates. The `embedding` field is a semantic fingerprint (768 numbers from nomic-embed-text in dataset v1.0, 2,560 from qwen3-embedding:4b with the current code) enabling cosine similarity search across the entire corpus regardless of vocabulary, journal, or decade.
 
 Q&A pairs are not included in this public release.
 
@@ -123,7 +123,7 @@ Q&A pairs are not included in this public release.
 
 ## Cross-source connections found
 
-The linking rule pairs documents from different sources that share a compound, and keeps a pair when it also shares a cancer type or a pathway. On the released data it finds 13,324 such pairs, 43 of which share a compound, a cancer type and a pathway. `--crossref` prints the top 20. The pipeline does not check citations, so the two documents in a pair may already cite each other. Note: the released `--crossref` reads at most 100,000 candidate rows, about 15% of the candidates on this data.
+The linking rule pairs documents from different sources that share a compound, and keeps a pair when it also shares a cancer type or a pathway. On the released data it finds 13,324 such pairs, 43 of which share a compound, a cancer type and a pathway. `--crossref` prints the top 20. The pipeline does not check citations, so the two documents in a pair may already cite each other. The code used for dataset v1.0 read at most 100,000 candidate rows, about 15% of the candidates. The current `--crossref` scores every candidate pair once.
 
 Example finding:
 ```
@@ -142,9 +142,11 @@ Confidence: 0.75
 
 ```bash
 pip install requests tqdm
-ollama pull qwen2.5:7b
-ollama pull nomic-embed-text
+ollama pull qwen3.6:35b          # extraction (dataset v1.0 used qwen2.5:7b)
+ollama pull qwen3-embedding:4b   # embeddings (dataset v1.0 used nomic-embed-text)
 ```
+
+The two models can run on different machines. `OLLAMA_BASE` is the Ollama server for extraction, `EMBED_BASE` the one for embeddings (it defaults to `OLLAMA_BASE`), and `LLM_MODEL` and `EMBED_MODEL` choose the models. Thinking is turned off for the extraction model. `query.py --search` must embed the query with the same model that embedded the records, so set `EMBED_MODEL=nomic-embed-text` when you search dataset v1.0.
 
 Full pipeline code at: [github.com/DaniMihai95/open-cancer-kg](https://github.com/DaniMihai95/open-cancer-kg)
 
@@ -161,7 +163,7 @@ Optional - free NCBI API key for higher rate limits (10 req/sec vs 3):
 # Test first
 python pipeline.py --source pubmed --limit 100 --workers 2
 
-# Full runs - fully resumable if interrupted
+# Full runs - fully resumable if interrupted. Add --qa to also write 5 Q&A pairs per document (doubles the time)
 python pipeline.py --source pubmed  --limit 50000 --workers 3
 python pipeline.py --source trials  --limit 20000 --workers 3
 python pipeline.py --source pubchem --limit 10000 --workers 3

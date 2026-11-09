@@ -6,8 +6,8 @@
 ║           siloed databases have never made.                                  ║
 ║                                                                              ║
 ║  Sources : PubMed (abstracts + MeSH) · ClinicalTrials.gov · PubChem         ║
-║  LLM     : qwen2.5:7b via Ollama (extraction + Q&A)                         ║
-║  Embeds  : nomic-embed-text via Ollama                                       ║
+║  LLM     : qwen3.6:35b via Ollama (extraction, optional Q&A)                ║
+║  Embeds  : qwen3-embedding:4b via Ollama                                     ║
 ║  Output  : NDJSON knowledge records + SQLite graph index                     ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
@@ -16,21 +16,29 @@ Setup
 pip install requests tqdm
 
 Ollama models (one-time):
-  ollama pull qwen2.5:7b
-  ollama pull nomic-embed-text
+  ollama pull qwen3.6:35b
+  ollama pull qwen3-embedding:4b
+
+The two models can run on different machines: OLLAMA_BASE is the server for
+extraction, EMBED_BASE the server for embeddings (default: the same as
+OLLAMA_BASE). Thinking is turned off for the extraction model, because a
+thinking model otherwise spends its whole token budget before the JSON.
 
 Run examples
 ------------
   # Test with 100 docs
-  python cancer_pipeline.py --source pubmed --limit 100
+  python pipeline.py --source pubmed --limit 100
 
   # Full run, all sources (leave overnight)
-  python cancer_pipeline.py --source pubmed   --limit 50000 --workers 3
-  python cancer_pipeline.py --source trials   --limit 20000 --workers 2
-  python cancer_pipeline.py --source pubchem  --limit 10000 --workers 2
+  python pipeline.py --source pubmed   --limit 50000 --workers 3
+  python pipeline.py --source trials   --limit 20000 --workers 2
+  python pipeline.py --source pubchem  --limit 10000 --workers 2
+
+  # Also write 5 Q&A pairs per document (off by default, doubles the time)
+  python pipeline.py --source pubmed --limit 100 --qa
 
   # Cross-reference pass (run AFTER all sources complete)
-  python cancer_pipeline.py --crossref
+  python pipeline.py --crossref
 
 What makes this different
 -------------------------
@@ -68,9 +76,10 @@ from tqdm import tqdm
 # Config
 # ─────────────────────────────────────────────────────────────────────────────
 
-OLLAMA_BASE  = os.getenv("OLLAMA_BASE",  "http://localhost:11434")
-LLM_MODEL    = os.getenv("LLM_MODEL",   "qwen2.5:14b")
-EMBED_MODEL  = os.getenv("EMBED_MODEL", "nomic-embed-text")
+OLLAMA_BASE  = os.getenv("OLLAMA_BASE",  "http://localhost:11434")   # extraction server
+EMBED_BASE   = os.getenv("EMBED_BASE",   OLLAMA_BASE)                  # embedding server
+LLM_MODEL    = os.getenv("LLM_MODEL",   "qwen3.6:35b")
+EMBED_MODEL  = os.getenv("EMBED_MODEL", "qwen3-embedding:4b")
 
 OUTPUT_DIR   = Path("cancer_output")
 DB_PATH      = Path("cancer_pipeline.db")
@@ -249,6 +258,7 @@ def ollama_generate(prompt: str, system: str, temperature: float = 0.05,
         "prompt":  prompt,
         "system":  system,
         "stream":  False,
+        "think":   False,   # a thinking model would spend num_predict before the JSON
         "options": {"temperature": temperature, "num_predict": max_tokens},
     }
     # Note: not using format=json - complex nested schema breaks it
@@ -267,12 +277,12 @@ def ollama_generate(prompt: str, system: str, temperature: float = 0.05,
 
 
 def ollama_embed(text: str) -> list[float]:
-    # Truncate to avoid OOM; nomic-embed-text context = 8192 tokens
+    # Truncate to keep requests small; both embedding models take far more than 4,000 characters
     payload = {"model": EMBED_MODEL, "prompt": text[:4000]}
     for attempt in range(4):
         try:
             r = requests.post(
-                f"{OLLAMA_BASE}/api/embeddings", json=payload, timeout=60
+                f"{EMBED_BASE}/api/embeddings", json=payload, timeout=60
             )
             r.raise_for_status()
             return r.json().get("embedding", [])
@@ -401,6 +411,9 @@ def build_embed_string(record: dict) -> str:
 # Full document processing - all 3 passes
 # ─────────────────────────────────────────────────────────────────────────────
 
+WRITE_QA = False   # set by --qa
+
+
 def process_document(doc_id: str, source: str, title: str, raw_text: str) -> dict | None:
     if not raw_text or not raw_text.strip():
         return None
@@ -414,8 +427,9 @@ def process_document(doc_id: str, source: str, title: str, raw_text: str) -> dic
     if not extracted.get("title"):
         extracted["title"] = title
 
-    # Pass 2: Q&A
-    qa_pairs = generate_cancer_qa(raw_text, context_summary=extracted.get("summary", ""))
+    # Pass 2: Q&A, only with --qa
+    qa_pairs = (generate_cancer_qa(raw_text, context_summary=extracted.get("summary", ""))
+                if WRITE_QA else [])
 
     # Pass 3: embedding
     embed_text = build_embed_string(extracted)
@@ -429,7 +443,7 @@ def process_document(doc_id: str, source: str, title: str, raw_text: str) -> dic
         **extracted,
         "qa_pairs":     qa_pairs,
         "embed_string": embed_text,      # keep for debugging / re-embedding
-        "embedding":    embedding,       # 768-dim float32 list
+        "embedding":    embedding,       # float list, 2,560 numbers for qwen3-embedding:4b
     }
     return record
 
@@ -606,7 +620,9 @@ def fetch_trials(limit: int = 20000):
             ),
         }
         if next_page:
-            params = {"format": "json", "pageToken": next_page, "pageSize": page_size}
+            # The API requires every later page to repeat the first page's parameters;
+            # without them it returns all studies, cancer or not.
+            params["pageToken"] = next_page
 
         try:
             r = requests.get(CT_API, params=params, timeout=30)
@@ -859,63 +875,57 @@ def write_split(kg_writer, qa_writer, record: dict):
 
 def run_crossref(conn: sqlite3.Connection):
     """
-    Find cross-source connections: a PubMed paper and a clinical trial
-    that share the same compound + cancer type but cite different pathways.
+    Find cross-source connections: two documents from different sources that
+    share a compound, and also a cancer type or a pathway.
 
-    These are the 'missed connections' - the whole point of this pipeline.
+    Every candidate pair is scored once, however many compounds it shares.
+    The pass does not check citations, so a pair may already cite each other.
     """
     log.info("Starting cross-reference pass...")
+    conn.execute("DELETE FROM crossref")
 
-    # Find all (compound, cancer_type) pairs that appear in more than one source
-    cursor = conn.execute("""
-        SELECT a.entity_name, a.doc_id, a.source, b.entity_name, b.doc_id, b.source
+    # One row per document pair (one direction only), with every compound it shares
+    pairs = conn.execute("""
+        SELECT a.doc_id, a.source, b.doc_id, b.source, group_concat(a.entity_name, '|')
         FROM entity_index a
         JOIN entity_index b ON (
-            a.doc_id   != b.doc_id AND
-            a.source   != b.source AND
+            a.source < b.source AND
             a.entity_type = 'compound' AND
             b.entity_type = 'compound' AND
             a.entity_name = b.entity_name
         )
-        LIMIT 100000
-    """)
-
-    compound_pairs = cursor.fetchall()
-    log.info(f"Found {len(compound_pairs)} compound cross-source pairs")
+        GROUP BY a.doc_id, b.doc_id
+    """).fetchall()
+    log.info(f"Found {len(pairs)} cross-source document pairs sharing a compound")
 
     connections_found = 0
-    for row in compound_pairs:
-        compound, doc_a, src_a, _, doc_b, src_b = row
-
-        # Check if they also share a cancer type (stronger signal)
+    for doc_a, src_a, doc_b, src_b, compounds in tqdm(pairs, unit="pair", desc="crossref"):
         shared_cancer = conn.execute("""
             SELECT a.entity_name FROM entity_index a
-            JOIN entity_index b ON a.entity_name = b.entity_name
+            JOIN entity_index b ON a.entity_name = b.entity_name AND b.entity_type = a.entity_type
             WHERE a.doc_id=? AND b.doc_id=? AND a.entity_type='cancer_type'
         """, (doc_a, doc_b)).fetchall()
-
-        # Check if they share pathways
         shared_path = conn.execute("""
             SELECT a.entity_name FROM entity_index a
-            JOIN entity_index b ON a.entity_name = b.entity_name
+            JOIN entity_index b ON a.entity_name = b.entity_name AND b.entity_type = a.entity_type
             WHERE a.doc_id=? AND b.doc_id=? AND a.entity_type='pathway'
         """, (doc_a, doc_b)).fetchall()
 
-        shared_keys = {
-            "compound":    compound,
-            "cancer_types": [r[0] for r in shared_cancer],
-            "pathways":    [r[0] for r in shared_path],
-        }
-
-        # Confidence: compound match=0.4, each shared cancer=+0.2, each shared pathway=+0.15
+        # Confidence: compound match=0.4, each shared cancer=+0.2 (max 0.3), each shared pathway=+0.15 (max 0.3)
         confidence = 0.4
         confidence += min(0.3, len(shared_cancer) * 0.2)
         confidence += min(0.3, len(shared_path)   * 0.15)
         confidence = min(1.0, confidence)
 
         if confidence >= 0.5:
+            shared_keys = {
+                "compound":     compounds.split("|")[0],
+                "compounds":    sorted(set(compounds.split("|"))),
+                "cancer_types": [r[0] for r in shared_cancer],
+                "pathways":     [r[0] for r in shared_path],
+            }
             conn.execute("""
-                INSERT OR IGNORE INTO crossref
+                INSERT INTO crossref
                 (doc_id_a, doc_id_b, source_a, source_b, shared_keys, confidence, surfaced_at)
                 VALUES (?,?,?,?,?,?,?)
             """, (
@@ -991,22 +1001,19 @@ def print_stats(conn: sqlite3.Connection):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def check_ollama():
-    try:
-        r = requests.get(f"{OLLAMA_BASE}/api/tags", timeout=5)
-        models = {m["name"] for m in r.json().get("models", [])}
-        missing = []
-        for needed in [LLM_MODEL, EMBED_MODEL]:
-            if not any(needed.split(":")[0] in m for m in models):
-                missing.append(needed)
-        if missing:
-            log.error(f"Missing Ollama models: {missing}")
-            log.error(f"Run: ollama pull {' && ollama pull '.join(missing)}")
+    for base, needed in [(OLLAMA_BASE, LLM_MODEL), (EMBED_BASE, EMBED_MODEL)]:
+        try:
+            r = requests.get(f"{base}/api/tags", timeout=5)
+            models = {m["name"] for m in r.json().get("models", [])}
+        except requests.exceptions.RequestException:
+            log.error(f"Cannot reach Ollama at {base}")
+            log.error("Make sure Ollama is running: ollama serve")
             sys.exit(1)
-        log.info(f"Ollama OK | models: {sorted(models)}")
-    except requests.exceptions.ConnectionError:
-        log.error(f"Cannot reach Ollama at {OLLAMA_BASE}")
-        log.error("Make sure Ollama is running: ollama serve")
-        sys.exit(1)
+        if needed not in models and f"{needed}:latest" not in models:
+            log.error(f"Model {needed} is not on the Ollama server at {base}")
+            log.error(f"Run there: ollama pull {needed}")
+            sys.exit(1)
+        log.info(f"Ollama OK at {base} | {needed}")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Main pipeline runner
@@ -1132,12 +1139,13 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python cancer_pipeline.py --source pubmed  --limit 200          # quick test
-  python cancer_pipeline.py --source pubmed  --limit 50000        # full run
-  python cancer_pipeline.py --source trials  --limit 20000
-  python cancer_pipeline.py --source pubchem --limit 10000
-  python cancer_pipeline.py --crossref                            # find connections
-  python cancer_pipeline.py --stats                               # print stats
+  python pipeline.py --source pubmed  --limit 200          # quick test
+  python pipeline.py --source pubmed  --limit 50000        # full run
+  python pipeline.py --source trials  --limit 20000
+  python pipeline.py --source pubchem --limit 10000
+  python pipeline.py --source pubmed  --limit 200 --qa     # also write Q&A pairs
+  python pipeline.py --crossref                            # find connections
+  python pipeline.py --stats                               # print stats
         """,
     )
     parser.add_argument("--source",   choices=list(SOURCE_MAP),
@@ -1146,6 +1154,8 @@ Examples:
                         help="Max documents (default: 5000)")
     parser.add_argument("--workers",  type=int, default=2,
                         help="Parallel workers (default: 2)")
+    parser.add_argument("--qa",       action="store_true",
+                        help="Also write 5 Q&A pairs per document (doubles the time)")
     parser.add_argument("--crossref", action="store_true",
                         help="Run cross-reference pass on processed data")
     parser.add_argument("--stats",    action="store_true",
@@ -1161,6 +1171,7 @@ Examples:
         print_stats(conn)
         conn.close()
     elif args.source:
+        WRITE_QA = args.qa
         run(source=args.source, limit=args.limit, workers=args.workers)
     else:
         parser.print_help()
