@@ -23,9 +23,10 @@ The two models can run on different machines: OLLAMA_BASE is the server for
 extraction, EMBED_BASE the server for embeddings (default: the same as
 OLLAMA_BASE). Thinking is turned off for the extraction model, because a
 thinking model otherwise spends its whole token budget before the JSON.
-EMBED_NUM_GPU=0 runs the embedding model on the CPU, so both models stay
-loaded on one machine whose graphics memory the extraction model fills
-(Ollama needs OLLAMA_MAX_LOADED_MODELS=2 for that). run_all.sh does it all.
+On one machine that cannot hold both models, run the sources with
+--no-embed (only the extraction model is loaded), then --embed once (only the
+embedding model is loaded): it adds the embeddings to the kg files in place.
+run_all.sh does it all.
 
 Run examples
 ------------
@@ -83,7 +84,6 @@ OLLAMA_BASE  = os.getenv("OLLAMA_BASE",  "http://localhost:11434")   # extractio
 EMBED_BASE   = os.getenv("EMBED_BASE",   OLLAMA_BASE)                  # embedding server
 LLM_MODEL    = os.getenv("LLM_MODEL",   "qwen3.6:35b")
 EMBED_MODEL  = os.getenv("EMBED_MODEL", "qwen3-embedding:4b")
-EMBED_NUM_GPU = os.getenv("EMBED_NUM_GPU", "")                          # "0": embed on the CPU
 
 OUTPUT_DIR   = Path("cancer_output")
 DB_PATH      = Path("cancer_pipeline.db")
@@ -283,8 +283,6 @@ def ollama_generate(prompt: str, system: str, temperature: float = 0.05,
 def ollama_embed(text: str) -> list[float]:
     # Truncate to keep requests small; both embedding models take far more than 4,000 characters
     payload = {"model": EMBED_MODEL, "prompt": text[:4000]}
-    if EMBED_NUM_GPU != "":
-        payload["options"] = {"num_gpu": int(EMBED_NUM_GPU)}
     for attempt in range(4):
         try:
             r = requests.post(
@@ -418,6 +416,7 @@ def build_embed_string(record: dict) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 WRITE_QA = False   # set by --qa
+EMBED_NOW = True   # cleared by --no-embed; --embed adds the embeddings later
 
 
 def process_document(doc_id: str, source: str, title: str, raw_text: str) -> dict | None:
@@ -439,7 +438,7 @@ def process_document(doc_id: str, source: str, title: str, raw_text: str) -> dic
 
     # Pass 3: embedding
     embed_text = build_embed_string(extracted)
-    embedding  = ollama_embed(embed_text)
+    embedding  = ollama_embed(embed_text) if EMBED_NOW else []
 
     record = {
         "doc_id":       doc_id,
@@ -452,6 +451,34 @@ def process_document(doc_id: str, source: str, title: str, raw_text: str) -> dic
         "embedding":    embedding,       # float list, 2,560 numbers for qwen3-embedding:4b
     }
     return record
+
+
+def run_embed():
+    """
+    Add the missing embeddings to every kg_*.jsonl, from each record's embed_string.
+    Only the embedding model is loaded. Each file is rewritten through a .tmp file;
+    an interrupted pass resumes from the lines the .tmp already holds.
+    """
+    check_ollama(need_llm=False)
+    for kg_path in sorted(OUTPUT_DIR.glob("kg_*.jsonl")):
+        tmp_path = kg_path.with_suffix(".jsonl.tmp")
+        have = sum(1 for _ in open(tmp_path, encoding="utf-8")) if tmp_path.exists() else 0
+        lines = open(kg_path, encoding="utf-8").readlines()
+        added = 0
+        with open(tmp_path, "a", encoding="utf-8") as out:
+            for line in tqdm(lines[have:], desc=f"embed {kg_path.name}", unit="doc",
+                             initial=have, total=len(lines), dynamic_ncols=True):
+                rec = json.loads(line)
+                if not rec.get("embedding") and rec.get("embed_string"):
+                    rec["embedding"] = ollama_embed(rec["embed_string"])
+                    added += 1
+                    line = json.dumps(rec, ensure_ascii=False) + "\n"
+                out.write(line)
+                out.flush()
+        os.replace(tmp_path, kg_path)
+        missing = sum(1 for line in open(kg_path, encoding="utf-8")
+                      if not json.loads(line).get("embedding"))
+        log.info(f"Embedded {kg_path.name}: added {added}, still without an embedding {missing}")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Source: PubMed  (E-utilities)
@@ -1006,8 +1033,9 @@ def print_stats(conn: sqlite3.Connection):
 # Ollama health check
 # ─────────────────────────────────────────────────────────────────────────────
 
-def check_ollama():
-    for base, needed in [(OLLAMA_BASE, LLM_MODEL), (EMBED_BASE, EMBED_MODEL)]:
+def check_ollama(need_llm: bool = True, need_embed: bool = True):
+    pairs = [(OLLAMA_BASE, LLM_MODEL)] * need_llm + [(EMBED_BASE, EMBED_MODEL)] * need_embed
+    for base, needed in pairs:
         try:
             r = requests.get(f"{base}/api/tags", timeout=5)
             models = {m["name"] for m in r.json().get("models", [])}
@@ -1033,7 +1061,7 @@ SOURCE_MAP = {
 
 
 def run(source: str, limit: int, workers: int):
-    check_ollama()
+    check_ollama(need_embed=EMBED_NOW)
     conn          = init_db()
     fetcher       = SOURCE_MAP[source]
     kg_path, qa_path = get_output_paths(source)
@@ -1150,6 +1178,8 @@ Examples:
   python pipeline.py --source trials  --limit 20000
   python pipeline.py --source pubchem --limit 10000
   python pipeline.py --source pubmed  --limit 200 --qa     # also write Q&A pairs
+  python pipeline.py --source pubmed  --limit 200 --no-embed  # extraction only
+  python pipeline.py --embed                               # then add the embeddings
   python pipeline.py --crossref                            # find connections
   python pipeline.py --stats                               # print stats
         """,
@@ -1162,13 +1192,19 @@ Examples:
                         help="Parallel workers (default: 2)")
     parser.add_argument("--qa",       action="store_true",
                         help="Also write 5 Q&A pairs per document (doubles the time)")
+    parser.add_argument("--no-embed", action="store_true",
+                        help="Extraction only, so only the extraction model is loaded; run --embed after")
+    parser.add_argument("--embed",    action="store_true",
+                        help="Add the missing embeddings to the kg files (only the embedding model is loaded)")
     parser.add_argument("--crossref", action="store_true",
                         help="Run cross-reference pass on processed data")
     parser.add_argument("--stats",    action="store_true",
                         help="Print corpus statistics")
     args = parser.parse_args()
 
-    if args.crossref:
+    if args.embed:
+        run_embed()
+    elif args.crossref:
         conn = init_db()
         run_crossref(conn)
         conn.close()
@@ -1178,6 +1214,7 @@ Examples:
         conn.close()
     elif args.source:
         WRITE_QA = args.qa
+        EMBED_NOW = not args.no_embed
         run(source=args.source, limit=args.limit, workers=args.workers)
     else:
         parser.print_help()
