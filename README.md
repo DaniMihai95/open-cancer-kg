@@ -217,7 +217,7 @@ python query.py --export-connections connections.csv
 
 This dataset (extracted JSON records + embeddings) is released under **CC BY 4.0** - free to use with attribution.
 
-Pipeline code is released under **MIT License**.
+Pipeline code is free software under the GNU Affero General Public License 3.0 (`LICENSE`), from this version on. If you run a changed version as a service for others, you share your changes under the same licence. Copies obtained before this change keep the MIT licence they came with.
 
 Q&A pairs are not released publicly.
 
