@@ -157,6 +157,17 @@ Optional - free NCBI API key for higher rate limits (10 req/sec vs 3):
 
 ---
 
+## Run everything on one machine
+
+`run_all.sh` sets up a Python environment, checks that PubMed, ClinicalTrials.gov and PubChem answer, then runs every step below with the same limits as dataset v1.0. Ollama with both models runs on the same machine. The embedding model runs on the CPU (`EMBED_NUM_GPU=0`) so the extraction model keeps the graphics cards, and Ollama must be allowed to keep both loaded (`OLLAMA_MAX_LOADED_MODELS=2`), or it swaps them on every record.
+
+```bash
+./run_all.sh test   # 100 PubMed records, to check the setup
+./run_all.sh        # the full run, several days; run it again to resume
+```
+
+Outputs go to `work/`.
+
 ## Run order
 
 ```bash

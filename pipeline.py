@@ -23,6 +23,9 @@ The two models can run on different machines: OLLAMA_BASE is the server for
 extraction, EMBED_BASE the server for embeddings (default: the same as
 OLLAMA_BASE). Thinking is turned off for the extraction model, because a
 thinking model otherwise spends its whole token budget before the JSON.
+EMBED_NUM_GPU=0 runs the embedding model on the CPU, so both models stay
+loaded on one machine whose graphics memory the extraction model fills
+(Ollama needs OLLAMA_MAX_LOADED_MODELS=2 for that). run_all.sh does it all.
 
 Run examples
 ------------
@@ -80,6 +83,7 @@ OLLAMA_BASE  = os.getenv("OLLAMA_BASE",  "http://localhost:11434")   # extractio
 EMBED_BASE   = os.getenv("EMBED_BASE",   OLLAMA_BASE)                  # embedding server
 LLM_MODEL    = os.getenv("LLM_MODEL",   "qwen3.6:35b")
 EMBED_MODEL  = os.getenv("EMBED_MODEL", "qwen3-embedding:4b")
+EMBED_NUM_GPU = os.getenv("EMBED_NUM_GPU", "")                          # "0": embed on the CPU
 
 OUTPUT_DIR   = Path("cancer_output")
 DB_PATH      = Path("cancer_pipeline.db")
@@ -279,6 +283,8 @@ def ollama_generate(prompt: str, system: str, temperature: float = 0.05,
 def ollama_embed(text: str) -> list[float]:
     # Truncate to keep requests small; both embedding models take far more than 4,000 characters
     payload = {"model": EMBED_MODEL, "prompt": text[:4000]}
+    if EMBED_NUM_GPU != "":
+        payload["options"] = {"num_gpu": int(EMBED_NUM_GPU)}
     for attempt in range(4):
         try:
             r = requests.post(
